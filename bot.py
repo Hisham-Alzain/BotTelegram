@@ -71,6 +71,9 @@ BTN_ADD_FILE = "📎 رفع ملف"
 BTN_RENAME = "✏️ إعادة تسمية"
 BTN_DELETE = "🗑 حذف القسم"
 BTN_CANCEL = "❌ إلغاء"
+BTN_ADD_ADMIN = "👤 إضافة مشرف"
+BTN_LIST_ADMINS = "👥 قائمة المشرفين"
+BTN_REMOVE_ADMIN = "🗑 إزالة مشرف"
 
 # Conversation states
 (
@@ -79,7 +82,9 @@ BTN_CANCEL = "❌ إلغاء"
     ADM_UPLOADING_FILE,
     ADM_TYPING_CAPTION,
     ADM_TYPING_RENAME,
-) = range(5)
+    ADM_TYPING_USERNAME,
+    ADM_TYPING_REMOVE,
+) = range(7)
 
 TYPE_EMOJI = {"document": "📄", "audio": "🎵", "video": "🎬"}
 
@@ -397,15 +402,16 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # Admin conversation
 
 
-def admin_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton(BTN_ADD_MENU), KeyboardButton(BTN_ADD_FILE)],
-            [KeyboardButton(BTN_RENAME), KeyboardButton(BTN_DELETE)],
-            [KeyboardButton(BTN_CANCEL)],
-        ],
-        resize_keyboard=True,
-    )
+def admin_keyboard(is_super: bool = False) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(BTN_ADD_MENU), KeyboardButton(BTN_ADD_FILE)],
+        [KeyboardButton(BTN_RENAME), KeyboardButton(BTN_DELETE)],
+    ]
+    if is_super:
+        rows.append([KeyboardButton(BTN_ADD_ADMIN), KeyboardButton(BTN_LIST_ADMINS)])
+        rows.append([KeyboardButton(BTN_REMOVE_ADMIN)])
+    rows.append([KeyboardButton(BTN_CANCEL)])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 async def admin_entry(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -416,7 +422,7 @@ async def admin_entry(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     loc = f"«{menu['label']}»" if menu else "القائمة الرئيسية"
     await update.message.reply_text(
         f"🔧 *إدارة {loc}*\n\nاختر العملية:",
-        reply_markup=admin_keyboard(),
+        reply_markup=admin_keyboard(is_super=is_superadmin(update.effective_user.id)),
         parse_mode="Markdown",
     )
     return ADM_CHOOSING
@@ -425,6 +431,23 @@ async def admin_entry(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def adm_choose(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     menu_id = current_menu_id(ctx)
+
+    # If the user pressed a navigation or menu button instead of an admin option,
+    # exit the conversation and re-dispatch to normal navigation.
+    ADMIN_BTNS = {
+        BTN_ADD_MENU,
+        BTN_ADD_FILE,
+        BTN_RENAME,
+        BTN_DELETE,
+        BTN_CANCEL,
+        BTN_ADD_ADMIN,
+        BTN_LIST_ADMINS,
+        BTN_REMOVE_ADMIN,
+    }
+    if text not in ADMIN_BTNS:
+        await show_level(update, ctx, menu_id, "❌ خروج من الإدارة.")
+        await handle_message(update, ctx)
+        return ConversationHandler.END
 
     if text == BTN_CANCEL:
         await show_level(update, ctx, menu_id, "❌ تم الإلغاء.")
@@ -488,6 +511,53 @@ async def adm_choose(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             update, ctx, new_menu_id, f"🗑 تم حذف القسم «{menu['label']}» وكل محتوياته."
         )
         return ConversationHandler.END
+
+    if text == BTN_ADD_ADMIN:
+        if not is_superadmin(update.effective_user.id):
+            await update.message.reply_text("⛔ فقط المشرف الرئيسي يمكنه إضافة مشرفين.")
+            return ADM_CHOOSING
+        await update.message.reply_text(
+            "👤 أرسل *يوزرنيم* المشرف الجديد بصيغة @username:",
+            reply_markup=ReplyKeyboardMarkup(
+                [[KeyboardButton(BTN_CANCEL)]], resize_keyboard=True
+            ),
+            parse_mode="Markdown",
+        )
+        return ADM_TYPING_USERNAME
+
+    if text == BTN_REMOVE_ADMIN:
+        if not is_superadmin(update.effective_user.id):
+            await update.message.reply_text("⛔ فقط المشرف الرئيسي يمكنه إزالة مشرفين.")
+            return ADM_CHOOSING
+        rows = db.get_all_admins()
+        if not rows:
+            await update.message.reply_text("📭 لا يوجد مشرفون مضافون.")
+            return ADM_CHOOSING
+        # Build keyboard of removable admins
+        btns = [[KeyboardButton(f"🗑 @{r['username']}")] for r in rows]
+        btns.append([KeyboardButton(BTN_CANCEL)])
+        await update.message.reply_text(
+            "👥 اختر المشرف الذي تريد إزالته:",
+            reply_markup=ReplyKeyboardMarkup(btns, resize_keyboard=True),
+        )
+        return ADM_TYPING_REMOVE
+
+    if text == BTN_LIST_ADMINS:
+        rows = db.get_all_admins()
+        lines = ["👥 *قائمة المشرفين*\n"]
+        lines.append("🔑 *مشرفون رئيسيون (ثابتون):*")
+        for uid in SUPERADMIN_IDS:
+            lines.append(f"  • ID: `{uid}`")
+        if rows:
+            lines.append("\n📋 *مشرفون مضافون:*")
+            for r in rows:
+                status = "✅ نشط" if r["confirmed"] else "⏳ معلّق"
+                uid_str = f" `(ID: {r['user_id']})`" if r["user_id"] else ""
+                lines.append(f"  • @{r['username']}{uid_str} — {status}")
+        else:
+            lines.append("\n_لا يوجد مشرفون مضافون بعد._")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return ADM_CHOOSING
 
     await update.message.reply_text("⚠️ اختر أحد الخيارات أعلاه.")
     return ADM_CHOOSING
@@ -582,6 +652,71 @@ async def adm_typing_rename(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def adm_typing_username(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    menu_id = current_menu_id(ctx)
+    if text == BTN_CANCEL:
+        await show_level(update, ctx, menu_id, "❌ تم الإلغاء.")
+        return ConversationHandler.END
+    if not text.startswith("@"):
+        await update.message.reply_text(
+            "⚠️ يجب أن يبدأ اليوزرنيم بـ @\nمثال: @hisham\n\nأرسل مجدداً أو اضغط ❌ إلغاء"
+        )
+        return ADM_TYPING_USERNAME
+    username = text.lstrip("@").strip().lower()
+    result = db.add_pending_admin(username, added_by=update.effective_user.id)
+    if result == "already_admin":
+        msg = f"ℹ️ @{username} مشرف بالفعل."
+    elif result == "already_pending":
+        msg = f"⏳ @{username} مضاف بالفعل وبانتظار التفعيل."
+    else:
+        msg = (
+            f"✅ تم إضافة @{username} كمشرف معلّق.\n\n"
+            f"⏳ سيصبح نشطاً فور إرساله أي رسالة للبوت."
+        )
+        logger.info(
+            "Admin @%s added via button by user_id=%d",
+            username,
+            update.effective_user.id,
+        )
+    await show_level(update, ctx, menu_id, msg)
+    return ConversationHandler.END
+
+
+async def adm_typing_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    menu_id = current_menu_id(ctx)
+    if text == BTN_CANCEL:
+        await show_level(update, ctx, menu_id, "❌ تم الإلغاء.")
+        return ConversationHandler.END
+    # Buttons are formatted as "🗑 @username"
+    username = text.replace("🗑", "").replace("@", "").strip().lower()
+    if not username:
+        await update.message.reply_text("⚠️ اختر مشرفاً من القائمة أو اضغط ❌ إلغاء.")
+        return ADM_TYPING_REMOVE
+    # Protect superadmins
+    for r in db.get_all_admins():
+        if (
+            r["username"] == username
+            and r["user_id"]
+            and r["user_id"] in SUPERADMIN_IDS
+        ):
+            await update.message.reply_text("⛔ لا يمكن إزالة المشرف الرئيسي.")
+            return ADM_TYPING_REMOVE
+    removed = db.remove_admin(username)
+    if removed:
+        msg = f"🗑 تم إزالة @{username} من المشرفين."
+        logger.info(
+            "Admin @%s removed via button by user_id=%d",
+            username,
+            update.effective_user.id,
+        )
+    else:
+        msg = f"⚠️ لم يتم العثور على @{username}."
+    await show_level(update, ctx, menu_id, msg)
+    return ConversationHandler.END
+
+
 async def adm_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     menu_id = current_menu_id(ctx)
     await show_level(update, ctx, menu_id, "❌ تم الإلغاء.")
@@ -611,7 +746,7 @@ def main():
     admin_conv = ConversationHandler(
         entry_points=[
             MessageHandler(
-                filters.Text([BTN_ADMIN]) & filters.User(list(SUPERADMIN_IDS)),
+                filters.Text([BTN_ADMIN]),
                 admin_entry,
             )
         ],
@@ -636,10 +771,16 @@ def main():
             ADM_TYPING_RENAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, adm_typing_rename)
             ],
+            ADM_TYPING_USERNAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, adm_typing_username)
+            ],
+            ADM_TYPING_REMOVE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, adm_typing_remove)
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", adm_cancel),
-            MessageHandler(filters.Text([BTN_CANCEL]), adm_cancel),
+            MessageHandler(filters.Text([BTN_CANCEL, BTN_HOME, BTN_BACK]), adm_cancel),
         ],
     )
 
