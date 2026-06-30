@@ -4,7 +4,7 @@ db.py — SQLite persistence for the archive bot menu tree.
 Schema
 ------
 menus   : tree of menu nodes (id, parent_id, label, position)
-files   : files attached to a menu node (id, menu_id, file_id, caption, file_type, position)
+files   : files attached to a menu node (id, menu_id, file_id, caption, file_type, position, message)
 admins  : dynamic admin list (user_id, username, added_by, confirmed)
           confirmed=0 -> pending (username stored, numeric ID not yet seen)
           confirmed=1 -> active (user has messaged bot, ID resolved)
@@ -51,7 +51,8 @@ def init_db():
                 file_id   TEXT    NOT NULL,
                 caption   TEXT    NOT NULL DEFAULT '',
                 file_type TEXT    NOT NULL DEFAULT 'document',
-                position  INTEGER NOT NULL DEFAULT 0
+                position  INTEGER NOT NULL DEFAULT 0,
+                message   TEXT    NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS admins (
@@ -68,6 +69,12 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_admins_uid   ON admins(user_id);
             CREATE INDEX IF NOT EXISTS idx_admins_uname ON admins(username);
         """)
+
+    # Migration: add 'message' column for DBs created before this feature existed.
+    with conn() as c:
+        cols = [r["name"] for r in c.execute("PRAGMA table_info(files)").fetchall()]
+        if "message" not in cols:
+            c.execute("ALTER TABLE files ADD COLUMN message TEXT NOT NULL DEFAULT ''")
 
     # Seed root menus if empty
     with conn() as c:
@@ -149,16 +156,18 @@ def get_file(file_db_id: int):
         return c.execute("SELECT * FROM files WHERE id = ?", (file_db_id,)).fetchone()
 
 
-def add_file(menu_id: int, file_id: str, caption: str, file_type: str) -> int:
+def add_file(
+    menu_id: int, file_id: str, caption: str, file_type: str, message: str = ""
+) -> int:
     with conn() as c:
         pos = c.execute(
             "SELECT COALESCE(MAX(position)+1, 0) FROM files WHERE menu_id = ?",
             (menu_id,),
         ).fetchone()[0]
         cur = c.execute(
-            "INSERT INTO files (menu_id, file_id, caption, file_type, position) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (menu_id, file_id, caption, file_type, pos),
+            "INSERT INTO files (menu_id, file_id, caption, file_type, position, message) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (menu_id, file_id, caption, file_type, pos, message),
         )
         return cur.lastrowid
 

@@ -74,6 +74,7 @@ BTN_CANCEL = "❌ إلغاء"
 BTN_ADD_ADMIN = "👤 إضافة مشرف"
 BTN_LIST_ADMINS = "👥 قائمة المشرفين"
 BTN_REMOVE_ADMIN = "🗑 إزالة مشرف"
+BTN_SKIP = "⏭ تخطي"
 
 # Conversation states
 (
@@ -81,10 +82,11 @@ BTN_REMOVE_ADMIN = "🗑 إزالة مشرف"
     ADM_TYPING_LABEL,
     ADM_UPLOADING_FILE,
     ADM_TYPING_CAPTION,
+    ADM_TYPING_MESSAGE,
     ADM_TYPING_RENAME,
     ADM_TYPING_USERNAME,
     ADM_TYPING_REMOVE,
-) = range(7)
+) = range(8)
 
 TYPE_EMOJI = {"document": "📄", "audio": "🎵", "video": "🎬"}
 
@@ -125,7 +127,7 @@ def build_keyboard(menu_id: int | None, user_id: int) -> ReplyKeyboardMarkup:
     rows: list[list[KeyboardButton]] = []
 
     children = db.get_root_menus() if menu_id is None else db.get_children(menu_id)
-    child_btns = [KeyboardButton(f"📁 {ch['label']}") for ch in children]
+    child_btns = [KeyboardButton(f" {ch['label']}") for ch in children]
 
     file_btns = []
     if menu_id is not None:
@@ -182,7 +184,7 @@ def resolve_label(label: str, menu_id: int | None):
 
     children = db.get_root_menus() if menu_id is None else db.get_children(menu_id)
     for ch in children:
-        if ch["label"] == clean or f"📁 {ch['label']}" == label:
+        if ch["label"] == clean or f" {ch['label']}" == label:
             return ("menu", ch)
 
     if menu_id is not None:
@@ -390,13 +392,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif kind == "file":
         ftype = row["file_type"]
         fid = row["file_id"]
-        cap = row["caption"] or ""
+        # `message` is the optional text the admin attached when uploading;
+        # it gets sent together with the file as its Telegram caption.
+        extra = row["message"] or ""
         if ftype == "audio":
-            await update.message.reply_audio(audio=fid, caption=cap)
+            await update.message.reply_audio(audio=fid, caption=extra)
         elif ftype == "video":
-            await update.message.reply_video(video=fid, caption=cap)
+            await update.message.reply_video(video=fid, caption=extra)
         else:
-            await update.message.reply_document(document=fid, caption=cap)
+            await update.message.reply_document(document=fid, caption=extra)
 
 
 # Admin conversation
@@ -631,13 +635,51 @@ async def adm_typing_caption(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if text == BTN_CANCEL:
         await show_level(update, ctx, menu_id, "❌ تم الإلغاء.")
         return ConversationHandler.END
+    # Save the button label, then ask for an optional message that will be
+    # sent together with the file whenever a user taps the button.
+    ctx.user_data["adm_caption"] = text
+    await update.message.reply_text(
+        "💬 أرسل *رسالة اختيارية* سترافق الملف عند إرساله للمستخدم\n"
+        "_(أو اضغط ⏭ تخطي لعدم إضافة رسالة)_",
+        reply_markup=ReplyKeyboardMarkup(
+            [[KeyboardButton(BTN_SKIP)], [KeyboardButton(BTN_CANCEL)]],
+            resize_keyboard=True,
+        ),
+        parse_mode="Markdown",
+    )
+    return ADM_TYPING_MESSAGE
+
+
+async def adm_typing_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    menu_id = current_menu_id(ctx)
+    if text == BTN_CANCEL:
+        ctx.user_data.pop("adm_file_id", None)
+        ctx.user_data.pop("adm_file_type", None)
+        ctx.user_data.pop("adm_default", None)
+        ctx.user_data.pop("adm_caption", None)
+        await show_level(update, ctx, menu_id, "❌ تم الإلغاء.")
+        return ConversationHandler.END
+
+    extra_message = "" if text == BTN_SKIP else text
+    caption = ctx.user_data["adm_caption"]
+
     db.add_file(
-        menu_id, ctx.user_data["adm_file_id"], text, ctx.user_data["adm_file_type"]
+        menu_id,
+        ctx.user_data["adm_file_id"],
+        caption,
+        ctx.user_data["adm_file_type"],
+        extra_message,
     )
     ctx.user_data.pop("adm_file_id", None)
     ctx.user_data.pop("adm_file_type", None)
     ctx.user_data.pop("adm_default", None)
-    await show_level(update, ctx, menu_id, f"✅ تمت إضافة الملف *{text}*!")
+    ctx.user_data.pop("adm_caption", None)
+
+    confirm = f"✅ تمت إضافة الملف *{caption}*!"
+    if extra_message:
+        confirm += "\n💬 وتم حفظ الرسالة المرافقة له."
+    await show_level(update, ctx, menu_id, confirm)
     return ConversationHandler.END
 
 
@@ -767,6 +809,9 @@ def main():
             ],
             ADM_TYPING_CAPTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, adm_typing_caption)
+            ],
+            ADM_TYPING_MESSAGE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, adm_typing_message)
             ],
             ADM_TYPING_RENAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, adm_typing_rename)
